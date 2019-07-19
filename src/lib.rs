@@ -403,15 +403,16 @@ impl Cache {
     }
 
     /// Wrap the result of the given future to load and store from cache.
-    pub async fn wrap<K, T>(
+    pub async fn wrap<K, T, E>(
         &self,
         key: K,
         age: Duration,
-        future: impl Future<Output = Result<T, Error>>,
-    ) -> Result<T, Error>
+        future: impl Future<Output = Result<T, E>>,
+    ) -> Result<T, E>
     where
         K: Serialize,
         T: Clone + Serialize + serde::de::DeserializeOwned,
+        E: From<Error>,
     {
         let key = match self.get(key)? {
             EntryRef { key, state, .. } => match state {
