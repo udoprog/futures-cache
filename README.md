@@ -22,7 +22,7 @@ The state of the library is:
 This library requires the user to add the following dependencies to use:
 
 ```toml
-futures-cache = "0.1.0"
+futures-cache = "0.2.0"
 serde = {version = "1.0.97", features = ["derive"]}
 chrono = {version = "0.4.7", features = ["serde"]}
 rocksdb = "0.12.2"
