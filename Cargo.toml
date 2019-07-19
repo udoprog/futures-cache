@@ -1,0 +1,23 @@
+[package]
+name = "futures-cache"
+version = "0.1.0"
+authors = ["John-John Tedro <udoprog@tedro.se>"]
+edition = "2018"
+license = "MIT/Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/udoprog/futures-option"
+homepage = "https://github.com/udoprog/futures-option"
+documentation = "https://docs.rs/futures-option"
+description = """
+Extension traits for dealing with optional futures and streams
+"""
+
+[dependencies]
+futures-preview = {version = "0.3.0-alpha.17", features = ["async-await", "nightly"]}
+serde = {version = "1.0.97", features = ["derive"]}
+serde_json = "1.0.40"
+serde_cbor = "0.10.1"
+log = "0.4.7"
+chrono = {version = "0.4.7", features = ["serde"]}
+hex = "0.3.2"
+rocksdb = "0.12.2"

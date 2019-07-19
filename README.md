@@ -1,0 +1,68 @@
+# futures-cache
+
+Futures-aware cache implementation backed by RocksDB.
+
+## State
+
+The state of the library is:
+* API is limited to only `wrap`, which includes a timeout (#1).
+* Requests are currently racing in the `wrap` method, so multiple unecessary requests might occur when they should instead be queueing up (#2).
+* Entries only expires when the library is loaded (#3).
+* Only storage backend is RocksDB (#4).
+
+## Usage
+
+This library requires the user to add the following dependencies to use:
+
+```toml
+futures-cache = "0.1.0"
+serde = {version = "1.0.97", features = ["derive"]}
+chrono = {version = "0.4.7", features = ["serde"]}
+rocksdb = "0.12.2"
+```
+
+You'll also have to install LLVM and clang since these are build dependencies for RocksDB.
+You can get them at: <http://releases.llvm.org/download.html>.
+
+## Examples
+
+```rust
+use std::{path::Path, fs, error::Error};
+use rocksdb;
+use futures_cache::Cache;
+use futures;
+use chrono::Duration;
+use serde::{Serialize, Deserialize};
+
+enum Key<'a> {
+    /// Cache key for the get_user request.
+    GetUser(&'a str),
+}
+
+fn setup_cache() -> Result<Cache, Box<dyn Error>> {
+    let path = Path::new("path/to/cache");
+
+    if !path.is_dir() {
+        fs::create_dir_all(path)?;
+    }
+
+    let mut options = rocksdb::Options::default();
+    options.set_compression_type(rocksdb::DBCompressionType::Snappy);
+    options.set_keep_log_file_num(16);
+    options.create_if_missing(true);
+
+    Ok(Cache::load(rocksdb::DB::open(&options, path)?)?)
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let cache = setup_cache()?;
+    let api = Api::new()?;
+
+    futures::executor::block_on(async move {
+        // Cache for 12 hours.
+        let mary = cache.wrap(Key::GetUser("mary"), Duration::hours(12), api.get_user("mary")).await?;
+        // Second request will be cached.
+        let mary2 = cache.wrap(Key::GetUser("mary"), Duration::hours(12), api.get_user("mary")).await?;
+    });
+}
+```
