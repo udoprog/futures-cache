@@ -1,6 +1,6 @@
 [package]
 name = "futures-cache"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["John-John Tedro <udoprog@tedro.se>"]
 edition = "2018"
 license = "MIT/Apache-2.0"
@@ -21,3 +21,6 @@ log = "0.4.7"
 chrono = {version = "0.4.7", features = ["serde"]}
 hex = "0.3.2"
 rocksdb = "0.12.2"
+parking_lot = "0.9.0"
+hashbrown = "0.5.0"
+pin-utils = "0.1.0-alpha.4"
