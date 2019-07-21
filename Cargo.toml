@@ -5,9 +5,9 @@ authors = ["John-John Tedro <udoprog@tedro.se>"]
 edition = "2018"
 license = "MIT/Apache-2.0"
 readme = "README.md"
-repository = "https://github.com/udoprog/futures-option"
-homepage = "https://github.com/udoprog/futures-option"
-documentation = "https://docs.rs/futures-option"
+repository = "https://github.com/udoprog/futures-cache"
+homepage = "https://github.com/udoprog/futures-cache"
+documentation = "https://docs.rs/futures-cache"
 description = """
 Extension traits for dealing with optional futures and streams
 """
