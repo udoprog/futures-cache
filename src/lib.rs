@@ -31,6 +31,8 @@ pub enum Error {
     Json(json::error::Error),
     /// An underlying RocksDB error.
     Rocksdb(rocksdb::Error),
+    /// The underlying future failed (with an unspecified error).
+    Failed,
 }
 
 impl fmt::Display for Error {
@@ -39,6 +41,7 @@ impl fmt::Display for Error {
             Error::Cbor(e) => write!(fmt, "CBOR error: {}", e),
             Error::Json(e) => write!(fmt, "JSON error: {}", e),
             Error::Rocksdb(e) => write!(fmt, "RocksDB error: {}", e),
+            Error::Failed => write!(fmt, "Operation failed"),
         }
     }
 }
@@ -49,6 +52,7 @@ impl error::Error for Error {
             Error::Cbor(e) => Some(e),
             Error::Json(e) => Some(e),
             Error::Rocksdb(e) => Some(e),
+            _ => None,
         }
     }
 }
@@ -154,7 +158,7 @@ struct Inner {
     /// Underlying storage.
     db: Arc<rocksdb::DB>,
     /// Things to wake up.
-    wakers: Mutex<HashMap<Vec<u8>, VecDeque<oneshot::Sender<()>>>>,
+    wakers: Mutex<HashMap<Vec<u8>, VecDeque<oneshot::Sender<bool>>>>,
 }
 
 /// Primary cache abstraction.
@@ -442,29 +446,43 @@ impl Cache {
 
             if let Some(rx) = rx {
                 // Ignore if sender is missing, just loop again.
-                let _ = rx.await;
-            } else {
-                break;
+                match rx.await {
+                    Err(oneshot::Canceled) | Ok(true) => return Err(E::from(Error::Failed)),
+                    Ok(false) => continue,
+                }
             }
+
+            break;
         }
 
         // Compute the answer by polling the underlying future and store it in the cache,
         // then acquire the wakers lock and dispatch to all pending futures.
-        let output = future.await?;
-        self.inner_insert(&key, age, &output)?;
+        match future.await {
+            Ok(output) => {
+                self.inner_insert(&key, age, &output)?;
+                self.cleanup_key(&key, false);
+                Ok(output)
+            }
+            Err(e) => {
+                self.cleanup_key(&key, true);
+                Err(e)
+            }
+        }
+    }
 
-        let mut wakers = self
-            .inner
-            .wakers
-            .lock()
-            .remove(&key)
-            .expect("wakers collection registered");
+    /// Cleanup any dependents on the given key.
+    fn cleanup_key(&self, key: &[u8], error: bool) {
+        let mut wakers = match self.inner.wakers.lock().remove(key) {
+            Some(wakers) => wakers,
+            None => {
+                log::warn!("no wakers registered for key: {}", KeyFormat(key));
+                return;
+            }
+        };
 
         while let Some(waker) = wakers.pop_front() {
-            let _ = waker.send(());
+            let _ = waker.send(error);
         }
-
-        Ok(output)
     }
 
     /// Helper to serialize the key with the default namespace.
