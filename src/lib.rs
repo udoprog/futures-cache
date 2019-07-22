@@ -1,4 +1,4 @@
-#![feature(async_await)]
+#![feature(async_await, pin_into_inner)]
 #![deny(missing_docs)]
 //! # Futures-aware cache abstraction
 //!
@@ -12,15 +12,26 @@
 //!
 //! [`namespaced`]: Cache::namespaced
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
+use crossbeam::queue::SegQueue;
 use futures::channel::oneshot;
 use hashbrown::HashMap;
 use hex::ToHex as _;
-use parking_lot::Mutex;
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_cbor as cbor;
 use serde_json as json;
-use std::{collections::VecDeque, error, fmt, future::Future, sync::Arc};
+use std::{
+    error, fmt,
+    future::Future,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
+
+pub use chrono::Duration;
+pub use rocksdb;
 
 /// Error type for the cache.
 #[derive(Debug)]
@@ -152,13 +163,46 @@ impl PartialStoredEntry {
     }
 }
 
+#[derive(Default)]
+struct Waker {
+    /// Number of things waiting for a response.
+    pending: AtomicUsize,
+    /// Channels to use for notifying dependents.
+    channels: SegQueue<oneshot::Sender<bool>>,
+}
+
+impl Waker {
+    /// Spin on performing cleanup, receiving channels to notify until we are in a stable state
+    /// where everything has been reset.
+    fn cleanup(&self, error: bool) {
+        let mut previous = self.pending.load(Ordering::Acquire);
+
+        loop {
+            while previous != 1 {
+                while let Ok(waker) = self.channels.pop() {
+                    let _ = waker.send(error);
+                }
+
+                previous = self.pending.load(Ordering::Acquire);
+            }
+
+            previous = self.pending.compare_and_swap(1, 0, Ordering::AcqRel);
+
+            if previous == 1 {
+                break;
+            }
+        }
+    }
+}
+
 struct Inner {
     /// The serialized namespace this cache belongs to.
     ns: Option<cbor::Value>,
     /// Underlying storage.
     db: Arc<rocksdb::DB>,
     /// Things to wake up.
-    wakers: Mutex<HashMap<Vec<u8>, VecDeque<oneshot::Sender<bool>>>>,
+    /// TODO: clean up wakers that have been idle for a long time in future cleanup loop.
+    wakers: RwLock<HashMap<Vec<u8>, Arc<Waker>>>,
 }
 
 /// Primary cache abstraction.
@@ -409,6 +453,23 @@ impl Cache {
         Ok(State::Fresh(stored))
     }
 
+    /// Get the waker associated with the given key.
+    fn waker(&self, key: &[u8]) -> Arc<Waker> {
+        let wakers = self.inner.wakers.read();
+
+        match wakers.get(key) {
+            Some(waker) => return waker.clone(),
+            None => drop(wakers),
+        }
+
+        self.inner
+            .wakers
+            .write()
+            .entry(key.to_vec())
+            .or_default()
+            .clone()
+    }
+
     /// Wrap the result of the given future to load and store from cache.
     pub async fn wrap<'a, K, F, T, E>(&'a self, key: K, age: Duration, future: F) -> Result<T, E>
     where
@@ -417,71 +478,135 @@ impl Cache {
         T: Serialize + serde::de::DeserializeOwned,
         E: From<Error>,
     {
+        use std::{
+            pin::Pin,
+            task::{Context, Poll},
+        };
+
         let key = self.key(&key)?;
 
         loop {
-            match self.inner_get(&key)? {
-                State::Fresh(e) => return Ok(e.value),
-                State::Expired(..) | State::Missing => (),
-            };
-
-            // Acquire a short-lived lock over over the wakers map.
+            // There a slight race here. The answer might _just_ have been provided when we perform
+            // this check.
             //
-            // If an entry exist that means another `Wrap` instance is already computing
-            // the answer.
-            //
-            // If it doesn't, we are the `Wrap` instance that will compute the answer.
-            let rx = {
-                let mut wakers = self.inner.wakers.lock();
+            // If that happens, worst case we will end up re-computing the answer again.
+            if let State::Fresh(e) = self.inner_get(&key)? {
+                return Ok(e.value);
+            }
 
-                if let Some(queue) = wakers.get_mut(&key) {
-                    let (tx, rx) = oneshot::channel();
-                    queue.push_back(tx);
-                    Some(rx)
-                } else {
-                    wakers.insert(key.clone(), VecDeque::with_capacity(16));
-                    None
-                }
-            };
+            let waker = self.waker(&key);
 
-            if let Some(rx) = rx {
-                // Ignore if sender is missing, just loop again.
-                match rx.await {
-                    Err(oneshot::Canceled) | Ok(true) => return Err(E::from(Error::Failed)),
-                    Ok(false) => continue,
+            // only pending == 0 will be driving the future for a response.
+            if waker.pending.fetch_add(1, Ordering::AcqRel) > 0 {
+                let (tx, rx) = oneshot::channel();
+                waker.channels.push(tx);
+
+                let rx = Rx {
+                    rx,
+                    pending: &waker.pending,
+                };
+
+                // NB: we can be dropped right here and fetch_sub will never be called.
+                let result = rx.await;
+
+                // Ignore if sender is cancelled, just loop again.
+                match result {
+                    Ok(true) => return Err(E::from(Error::Failed)),
+                    Err(oneshot::Canceled) | Ok(false) => continue,
                 }
             }
 
-            break;
+            // Check key again in case we got really unlucky and had two call do an interleaving
+            // pass for the previous check:
+            //
+            // T1 just went passed the first inner_get test above.
+            // T2 just finished the Waker::cleanup procedure and reduces pending to 0.
+            // T1 notices that it is the first pending thread (pending == 0) and ends up here.
+            if let State::Fresh(e) = self.inner_get(&key)? {
+                waker.cleanup(false);
+                return Ok(e.value);
+            }
+
+            let future = Polled {
+                future,
+                waker: Some(&waker),
+            };
+
+            // Compute the answer by polling the underlying future and store it in the cache,
+            // then acquire the wakers lock and dispatch to all pending futures.
+            match future.await {
+                Ok(output) => {
+                    self.inner_insert(&key, age, &output)?;
+                    waker.cleanup(false);
+                    return Ok(output);
+                }
+                Err(e) => {
+                    waker.cleanup(true);
+                    return Err(e);
+                }
+            }
         }
 
-        // Compute the answer by polling the underlying future and store it in the cache,
-        // then acquire the wakers lock and dispatch to all pending futures.
-        match future.await {
-            Ok(output) => {
-                self.inner_insert(&key, age, &output)?;
-                self.cleanup_key(&key, false);
-                Ok(output)
-            }
-            Err(e) => {
-                self.cleanup_key(&key, true);
-                Err(e)
+        /// Make the rx-phase of the cache cancellation-safe by wrapping the pending decrease as
+        /// part of the Drop implementation.
+        struct Rx<'a> {
+            rx: oneshot::Receiver<bool>,
+            pending: &'a AtomicUsize,
+        }
+
+        impl Rx<'_> {
+            pin_utils::unsafe_pinned!(rx: oneshot::Receiver<bool>);
+        }
+
+        impl Future for Rx<'_> {
+            type Output = Result<bool, oneshot::Canceled>;
+
+            fn poll(self: Pin<&mut Self>, ctx: &mut Context) -> Poll<Self::Output> {
+                self.rx().poll(ctx)
             }
         }
-    }
 
-    /// Cleanup any dependents on the given key.
-    fn cleanup_key(&self, key: &[u8], error: bool) {
-        let mut wakers = match self.inner.wakers.lock().remove(key) {
-            Some(wakers) => wakers,
-            None => {
-                log::warn!("no wakers registered for key: {}", KeyFormat(key));
-                return;
+        impl Drop for Rx<'_> {
+            fn drop(&mut self) {
+                let _ = self.pending.fetch_sub(1, Ordering::AcqRel);
             }
-        };
+        }
 
-        while let Some(waker) = wakers.pop_front() {
-            let _ = waker.send(error);
+        struct Polled<'a, F, T, E>
+        where
+            F: Future<Output = Result<T, E>>,
+        {
+            future: F,
+            waker: Option<&'a Arc<Waker>>,
+        }
+
+        impl<'a, F, T, E> Future for Polled<'a, F, T, E>
+        where
+            T: Serialize,
+            E: From<Error>,
+            F: Future<Output = Result<T, E>>,
+        {
+            type Output = Result<T, E>;
+
+            fn poll(self: Pin<&mut Self>, ctx: &mut Context) -> Poll<Self::Output> {
+                let s = unsafe { Pin::into_inner_unchecked(self) };
+                let output =
+                    futures::ready!(unsafe { Pin::new_unchecked(&mut s.future) }.poll(ctx));
+                s.waker = None;
+                Poll::Ready(output)
+            }
+        }
+
+        impl<'a, F, T, E> Drop for Polled<'a, F, T, E>
+        where
+            F: Future<Output = Result<T, E>>,
+        {
+            fn drop(&mut self) {
+                // Perform cleanup in case we are cancelled.
+                if let Some(waker) = self.waker.take() {
+                    waker.cleanup(false);
+                }
+            }
         }
     }
 
@@ -525,5 +650,108 @@ impl fmt::Display for KeyFormat<'_> {
         };
 
         value.fmt(fmt)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{rocksdb, Cache, Duration, Error};
+    use std::{error, fs, sync::Arc, thread};
+    use tempdir::TempDir;
+
+    fn db(name: &str) -> Result<Arc<rocksdb::DB>, Box<dyn error::Error>> {
+        let path = TempDir::new(name)?;
+        let path = path.path();
+
+        if !path.is_dir() {
+            fs::create_dir_all(path)?;
+        }
+
+        let mut options = rocksdb::Options::default();
+        options.set_compression_type(rocksdb::DBCompressionType::Snappy);
+        options.set_keep_log_file_num(16);
+        options.create_if_missing(true);
+
+        Ok(Arc::new(rocksdb::DB::open(&options, path)?))
+    }
+
+    #[test]
+    fn test_cached() -> Result<(), Box<dyn error::Error>> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let db = db("test_cached")?;
+        let cache = Cache::load(db)?;
+
+        let count = Arc::new(AtomicUsize::default());
+
+        let c = count.clone();
+
+        let op1 = cache.wrap("a", Duration::hours(12), async move {
+            let _ = c.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, Error>(String::from("foo"))
+        });
+
+        let c = count.clone();
+
+        let op2 = cache.wrap("a", Duration::hours(12), async move {
+            let _ = c.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, Error>(String::from("foo"))
+        });
+
+        futures::executor::block_on(async move {
+            let (a, b) = futures::future::join(op1, op2).await;
+            assert_eq!("foo", a.expect("ok result"));
+            assert_eq!("foo", b.expect("ok result"));
+            assert_eq!(1, count.load(Ordering::SeqCst));
+        });
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_contended() -> Result<(), Box<dyn error::Error>> {
+        use crossbeam::queue::SegQueue;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        const THREAD_COUNT: usize = 1_000;
+
+        let db = db("test_contended")?;
+        let cache = Cache::load(db)?;
+
+        let started = Arc::new(AtomicBool::new(false));
+        let count = Arc::new(AtomicUsize::default());
+        let results = Arc::new(SegQueue::new());
+        let mut threads = Vec::with_capacity(THREAD_COUNT);
+
+        for _ in 0..THREAD_COUNT {
+            let started = started.clone();
+            let cache = cache.clone();
+            let results = results.clone();
+            let count = count.clone();
+
+            let t = thread::spawn(move || {
+                let op = cache.wrap("a", Duration::hours(12), async move {
+                    let _ = count.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, Error>(String::from("foo"))
+                });
+
+                while !started.load(Ordering::Acquire) {}
+
+                futures::executor::block_on(async move {
+                    results.push(op.await);
+                });
+            });
+
+            threads.push(t);
+        }
+
+        started.store(true, Ordering::Release);
+
+        for t in threads {
+            t.join().expect("thread to join");
+        }
+
+        assert_eq!(1, count.load(Ordering::SeqCst));
+        Ok(())
     }
 }

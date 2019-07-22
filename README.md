@@ -35,10 +35,8 @@ You can get them at: <http://releases.llvm.org/download.html>.
 
 ```rust
 use std::{path::Path, fs, error::Error, sync::Arc};
-use rocksdb;
-use futures_cache::Cache;
+use futures_cache::{rocksdb, Duration, Cache};
 use futures;
-use chrono::Duration;
 use serde::{Serialize, Deserialize};
 
 enum Key<'a> {

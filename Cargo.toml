@@ -20,7 +20,11 @@ serde_cbor = "0.10.1"
 log = "0.4.7"
 chrono = {version = "0.4.7", features = ["serde"]}
 hex = "0.3.2"
-rocksdb = "0.12.2"
+rocksdb = "0.12"
 parking_lot = "0.9.0"
 hashbrown = "0.5.0"
 pin-utils = "0.1.0-alpha.4"
+crossbeam = "0.7.1"
+
+[dev-dependencies]
+tempdir = "0.3.7"
