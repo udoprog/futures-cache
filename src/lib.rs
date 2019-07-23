@@ -178,12 +178,18 @@ impl Waker {
         let mut previous = self.pending.load(Ordering::Acquire);
 
         loop {
-            while previous != 1 {
+            while previous > 1 {
+                let mut received = 0usize;
+
                 while let Ok(waker) = self.channels.pop() {
+                    received += 1;
                     let _ = waker.send(error);
                 }
 
-                previous = self.pending.load(Ordering::Acquire);
+                // Subtract the number of notifications sent here. Setting this inside the wrap
+                // function would deadlock on singlethreaded executors since they can't make
+                // progress at the same time as this procedure.
+                previous = self.pending.fetch_sub(received, Ordering::AcqRel);
             }
 
             previous = self.pending.compare_and_swap(1, 0, Ordering::AcqRel);
@@ -496,13 +502,7 @@ impl Cache {
                 let (tx, rx) = oneshot::channel();
                 waker.channels.push(tx);
 
-                let result = Guard::new(|| {
-                    let _ = waker.pending.fetch_sub(1, Ordering::AcqRel);
-                })
-                .wrap(rx)
-                .await;
-
-                let _ = waker.pending.fetch_sub(1, Ordering::AcqRel);
+                let result = rx.await;
 
                 // Ignore if sender is cancelled, just loop again.
                 match result {
@@ -666,8 +666,8 @@ mod tests {
             Ok::<_, Error>(String::from("foo"))
         });
 
-        futures::executor::block_on(async move {
-            let (a, b) = futures::future::join(op1, op2).await;
+        ::futures::executor::block_on(async move {
+            let (a, b) = ::futures::future::join(op1, op2).await;
             assert_eq!("foo", a.expect("ok result"));
             assert_eq!("foo", b.expect("ok result"));
             assert_eq!(1, count.load(Ordering::SeqCst));
@@ -705,7 +705,7 @@ mod tests {
 
                 while !started.load(Ordering::Acquire) {}
 
-                futures::executor::block_on(async move {
+                ::futures::executor::block_on(async move {
                     results.push(op.await);
                 });
             });
@@ -721,5 +721,92 @@ mod tests {
 
         assert_eq!(1, count.load(Ordering::SeqCst));
         Ok(())
+    }
+
+    #[test]
+    fn test_guards() -> Result<(), Box<dyn error::Error>> {
+        use ::futures::channel::oneshot;
+        use std::sync::atomic::Ordering;
+
+        let db = db("test_guards")?;
+        let cache = Cache::load(db)?;
+
+        ::futures::executor::block_on(async move {
+            let (op1_tx, op1_rx) = oneshot::channel::<()>();
+
+            let mut op1 = cache.wrap("a", Duration::hours(12), async move {
+                let _ = op1_rx.await;
+                Ok::<_, Error>(String::from("foo"))
+            });
+
+            let (op2_tx, op2_rx) = oneshot::channel::<()>();
+
+            let mut op2 = cache.wrap("a", Duration::hours(12), async move {
+                let _ = op2_rx.await;
+                Ok::<_, Error>(String::from("foo"))
+            });
+
+            assert!(futures::poll_once(&mut op1).await.is_none());
+
+            let k = cache.key(&"a")?;
+            let waker = cache.inner.wakers.read().get(&k).cloned();
+            assert!(waker.is_some());
+            let waker = waker.expect("waker to be registered");
+
+            assert_eq!(1, waker.pending.load(Ordering::SeqCst));
+            assert!(futures::poll_once(&mut op2).await.is_none());
+            assert_eq!(2, waker.pending.load(Ordering::SeqCst));
+
+            op1_tx.send(()).expect("send to op1");
+            op2_tx.send(()).expect("send to op2");
+
+            assert!(futures::poll_once(&mut op1).await.is_some());
+            assert_eq!(0, waker.pending.load(Ordering::SeqCst));
+            assert!(futures::poll_once(&mut op2).await.is_some());
+
+            Ok(())
+        })
+    }
+
+    mod futures {
+        use std::{
+            future::Future,
+            pin::Pin,
+            task::{Context, Poll},
+        };
+
+        /// Poll the future once.
+        ///
+        /// This is probably not safe, so don't use it outside of this function.
+        pub fn poll_once<'a, F>(future: &'a mut F) -> PollOnce<'a, F> {
+            PollOnce::new(future)
+        }
+
+        pub struct PollOnce<'a, F> {
+            future: &'a mut F,
+        }
+
+        impl<'a, F> PollOnce<'a, F> {
+            /// Wrap a new future to be polled once.
+            pub fn new(future: &'a mut F) -> Self {
+                Self { future }
+            }
+        }
+
+        impl<'a, F> Future for PollOnce<'a, F>
+        where
+            F: Future,
+        {
+            type Output = Option<F::Output>;
+
+            fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+                unsafe {
+                    match Pin::new_unchecked(&mut *self.get_unchecked_mut().future).poll(cx) {
+                        Poll::Ready(output) => Poll::Ready(Some(output)),
+                        Poll::Pending => Poll::Ready(None),
+                    }
+                }
+            }
+        }
     }
 }
