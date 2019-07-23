@@ -1,4 +1,4 @@
-#![feature(async_await, pin_into_inner)]
+#![feature(async_await)]
 #![deny(missing_docs)]
 //! # Futures-aware cache abstraction
 //!
@@ -478,11 +478,6 @@ impl Cache {
         T: Serialize + serde::de::DeserializeOwned,
         E: From<Error>,
     {
-        use std::{
-            pin::Pin,
-            task::{Context, Poll},
-        };
-
         let key = self.key(&key)?;
 
         loop {
@@ -501,13 +496,13 @@ impl Cache {
                 let (tx, rx) = oneshot::channel();
                 waker.channels.push(tx);
 
-                let rx = Rx {
-                    rx,
-                    pending: &waker.pending,
-                };
+                let result = Guard::new(|| {
+                    let _ = waker.pending.fetch_sub(1, Ordering::AcqRel);
+                })
+                .wrap(rx)
+                .await;
 
-                // NB: we can be dropped right here and fetch_sub will never be called.
-                let result = rx.await;
+                let _ = waker.pending.fetch_sub(1, Ordering::AcqRel);
 
                 // Ignore if sender is cancelled, just loop again.
                 match result {
@@ -527,14 +522,12 @@ impl Cache {
                 return Ok(e.value);
             }
 
-            let future = Polled {
-                future,
-                waker: Some(&waker),
-            };
+            // Guard in case it is cancelled.
+            let result = Guard::new(|| waker.cleanup(false)).wrap(future).await;
 
             // Compute the answer by polling the underlying future and store it in the cache,
             // then acquire the wakers lock and dispatch to all pending futures.
-            match future.await {
+            match result {
                 Ok(output) => {
                     self.inner_insert(&key, age, &output)?;
                     waker.cleanup(false);
@@ -547,65 +540,40 @@ impl Cache {
             }
         }
 
-        /// Make the rx-phase of the cache cancellation-safe by wrapping the pending decrease as
-        /// part of the Drop implementation.
-        struct Rx<'a> {
-            rx: oneshot::Receiver<bool>,
-            pending: &'a AtomicUsize,
-        }
-
-        impl Rx<'_> {
-            pin_utils::unsafe_pinned!(rx: oneshot::Receiver<bool>);
-        }
-
-        impl Future for Rx<'_> {
-            type Output = Result<bool, oneshot::Canceled>;
-
-            fn poll(self: Pin<&mut Self>, ctx: &mut Context) -> Poll<Self::Output> {
-                self.rx().poll(ctx)
-            }
-        }
-
-        impl Drop for Rx<'_> {
-            fn drop(&mut self) {
-                let _ = self.pending.fetch_sub(1, Ordering::AcqRel);
-            }
-        }
-
-        struct Polled<'a, F, T, E>
+        /// Create a stack guard that will run unless it is forgotten.
+        struct Guard<F>
         where
-            F: Future<Output = Result<T, E>>,
+            F: FnMut(),
         {
-            future: F,
-            waker: Option<&'a Arc<Waker>>,
+            f: F,
         }
 
-        impl<'a, F, T, E> Future for Polled<'a, F, T, E>
+        impl<F> Guard<F>
         where
-            T: Serialize,
-            E: From<Error>,
-            F: Future<Output = Result<T, E>>,
+            F: FnMut(),
         {
-            type Output = Result<T, E>;
+            /// Construct a new finalizer.
+            pub fn new(f: F) -> Self {
+                Self { f }
+            }
 
-            fn poll(self: Pin<&mut Self>, ctx: &mut Context) -> Poll<Self::Output> {
-                let s = unsafe { Pin::into_inner_unchecked(self) };
-                let output =
-                    futures::ready!(unsafe { Pin::new_unchecked(&mut s.future) }.poll(ctx));
-                s.waker = None;
-                Poll::Ready(output)
+            /// Wrap the given future with this cancellation guard.
+            pub async fn wrap<O>(self, future: O) -> O::Output
+            where
+                O: Future,
+            {
+                let result = future.await;
+                std::mem::forget(self);
+                result
             }
         }
 
-        impl<'a, F, T, E> Drop for Polled<'a, F, T, E>
+        impl<F> Drop for Guard<F>
         where
-            F: Future<Output = Result<T, E>>,
+            F: FnMut(),
         {
             fn drop(&mut self) {
-                // Perform cleanup in case we are cancelled.
-                if let Some(waker) = self.waker.take() {
-                    waker.cleanup(false);
-                }
+                (self.f)();
             }
         }
     }
