@@ -734,17 +734,21 @@ mod tests {
         ::futures::executor::block_on(async move {
             let (op1_tx, op1_rx) = oneshot::channel::<()>();
 
-            let mut op1 = cache.wrap("a", Duration::hours(12), async move {
+            let op1 = cache.wrap("a", Duration::hours(12), async move {
                 let _ = op1_rx.await;
                 Ok::<_, Error>(String::from("foo"))
             });
 
+            pin_utils::pin_mut!(op1);
+
             let (op2_tx, op2_rx) = oneshot::channel::<()>();
 
-            let mut op2 = cache.wrap("a", Duration::hours(12), async move {
+            let op2 = cache.wrap("a", Duration::hours(12), async move {
                 let _ = op2_rx.await;
                 Ok::<_, Error>(String::from("foo"))
             });
+
+            pin_utils::pin_mut!(op2);
 
             assert!(futures::poll_once(&mut op1).await.is_none());
 
@@ -793,18 +797,19 @@ mod tests {
             }
         }
 
+        impl<'a, F> Unpin for PollOnce<'a, F> where F: Unpin {
+        }
+
         impl<'a, F> Future for PollOnce<'a, F>
         where
-            F: Future,
+            F: Unpin + Future,
         {
             type Output = Option<F::Output>;
 
-            fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-                unsafe {
-                    match Pin::new_unchecked(&mut *self.get_unchecked_mut().future).poll(cx) {
-                        Poll::Ready(output) => Poll::Ready(Some(output)),
-                        Poll::Pending => Poll::Ready(None),
-                    }
+            fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+                match Pin::new(&mut *self.as_mut().future).poll(cx) {
+                    Poll::Ready(output) => Poll::Ready(Some(output)),
+                    Poll::Pending => Poll::Ready(None),
                 }
             }
         }
