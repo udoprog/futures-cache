@@ -725,6 +725,7 @@ mod tests {
 
     #[test]
     fn test_guards() -> Result<(), Box<dyn error::Error>> {
+        use self::futures::PollOnce;
         use ::futures::channel::oneshot;
         use std::sync::atomic::Ordering;
 
@@ -750,7 +751,7 @@ mod tests {
 
             pin_utils::pin_mut!(op2);
 
-            assert!(futures::poll_once(&mut op1).await.is_none());
+            assert!(PollOnce::new(&mut op1).await.is_none());
 
             let k = cache.key(&"a")?;
             let waker = cache.inner.wakers.read().get(&k).cloned();
@@ -758,15 +759,15 @@ mod tests {
             let waker = waker.expect("waker to be registered");
 
             assert_eq!(1, waker.pending.load(Ordering::SeqCst));
-            assert!(futures::poll_once(&mut op2).await.is_none());
+            assert!(PollOnce::new(&mut op2).await.is_none());
             assert_eq!(2, waker.pending.load(Ordering::SeqCst));
 
             op1_tx.send(()).expect("send to op1");
             op2_tx.send(()).expect("send to op2");
 
-            assert!(futures::poll_once(&mut op1).await.is_some());
+            assert!(PollOnce::new(&mut op1).await.is_some());
             assert_eq!(0, waker.pending.load(Ordering::SeqCst));
-            assert!(futures::poll_once(&mut op2).await.is_some());
+            assert!(PollOnce::new(&mut op2).await.is_some());
 
             Ok(())
         })
@@ -779,35 +780,29 @@ mod tests {
             task::{Context, Poll},
         };
 
-        /// Poll the future once.
-        ///
-        /// This is probably not safe, so don't use it outside of this function.
-        pub fn poll_once<'a, F>(future: &'a mut F) -> PollOnce<'a, F> {
-            PollOnce::new(future)
+        pub struct PollOnce<F> {
+            future: F,
         }
 
-        pub struct PollOnce<'a, F> {
-            future: &'a mut F,
-        }
-
-        impl<'a, F> PollOnce<'a, F> {
+        impl<F> PollOnce<F> {
             /// Wrap a new future to be polled once.
-            pub fn new(future: &'a mut F) -> Self {
+            pub fn new(future: F) -> Self {
                 Self { future }
             }
         }
 
-        impl<'a, F> Unpin for PollOnce<'a, F> where F: Unpin {
+        impl<F> PollOnce<F> {
+            pin_utils::unsafe_pinned!(future: F);
         }
 
-        impl<'a, F> Future for PollOnce<'a, F>
+        impl<F> Future for PollOnce<F>
         where
-            F: Unpin + Future,
+            F: Future,
         {
             type Output = Option<F::Output>;
 
-            fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-                match Pin::new(&mut *self.as_mut().future).poll(cx) {
+            fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+                match self.future().poll(cx) {
                     Poll::Ready(output) => Poll::Ready(Some(output)),
                     Poll::Pending => Poll::Ready(None),
                 }
