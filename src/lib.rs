@@ -2,7 +2,7 @@
 #![deny(missing_docs)]
 //! # Futures-aware cache abstraction
 //!
-//! Provides a cache for asynchronous operations that persist data on the filesystem using RocksDB.
+//! Provides a cache for asynchronous operations that persist data on the filesystem using [sled].
 //!
 //! The async cache works by accepting a future, but will cancel the accepted future in case the
 //! answer is already in the cache.
@@ -10,6 +10,7 @@
 //! It requires unique cache keys that are `serde` serializable. To distinguish across different
 //! sub-components of the cache, they can be namespaces using [`namespaced`].
 //!
+//! [sled]: https://github.com/spacejam/sled
 //! [`namespaced`]: Cache::namespaced
 
 use chrono::{DateTime, Utc};
@@ -31,7 +32,7 @@ use std::{
 };
 
 pub use chrono::Duration;
-pub use rocksdb;
+pub use sled;
 
 /// Error type for the cache.
 #[derive(Debug)]
@@ -40,8 +41,8 @@ pub enum Error {
     Cbor(cbor::error::Error),
     /// An underlying JSON error.
     Json(json::error::Error),
-    /// An underlying RocksDB error.
-    Rocksdb(rocksdb::Error),
+    /// An underlying Sled error.
+    Sled(sled::Error),
     /// The underlying future failed (with an unspecified error).
     Failed,
 }
@@ -51,7 +52,7 @@ impl fmt::Display for Error {
         match self {
             Error::Cbor(e) => write!(fmt, "CBOR error: {}", e),
             Error::Json(e) => write!(fmt, "JSON error: {}", e),
-            Error::Rocksdb(e) => write!(fmt, "RocksDB error: {}", e),
+            Error::Sled(e) => write!(fmt, "Database error: {}", e),
             Error::Failed => write!(fmt, "Operation failed"),
         }
     }
@@ -62,7 +63,7 @@ impl error::Error for Error {
         match self {
             Error::Cbor(e) => Some(e),
             Error::Json(e) => Some(e),
-            Error::Rocksdb(e) => Some(e),
+            Error::Sled(e) => Some(e),
             _ => None,
         }
     }
@@ -80,9 +81,9 @@ impl From<cbor::error::Error> for Error {
     }
 }
 
-impl From<rocksdb::Error> for Error {
-    fn from(error: rocksdb::Error) -> Self {
-        Error::Rocksdb(error)
+impl From<sled::Error> for Error {
+    fn from(error: sled::Error) -> Self {
+        Error::Sled(error)
     }
 }
 
@@ -205,7 +206,7 @@ struct Inner {
     /// The serialized namespace this cache belongs to.
     ns: Option<cbor::Value>,
     /// Underlying storage.
-    db: Arc<rocksdb::DB>,
+    db: Arc<sled::Tree>,
     /// Things to wake up.
     /// TODO: clean up wakers that have been idle for a long time in future cleanup loop.
     wakers: RwLock<HashMap<Vec<u8>, Arc<Waker>>>,
@@ -221,7 +222,7 @@ pub struct Cache {
 
 impl Cache {
     /// Load the cache from the database.
-    pub fn load(db: Arc<rocksdb::DB>) -> Result<Cache, Error> {
+    pub fn load(db: Arc<sled::Tree>) -> Result<Cache, Error> {
         let cache = Cache {
             inner: Arc::new(Inner {
                 ns: None,
@@ -245,7 +246,7 @@ impl Cache {
         };
 
         let key = self.key_with_ns(ns.as_ref(), key)?;
-        self.inner.db.delete(&key)?;
+        self.inner.db.del(&key)?;
         Ok(())
     }
 
@@ -253,7 +254,9 @@ impl Cache {
     pub fn list_json(&self) -> Result<Vec<JsonEntry>, Error> {
         let mut out = Vec::new();
 
-        for (key, value) in self.inner.db.iterator(rocksdb::IteratorMode::Start) {
+        for result in self.inner.db.range::<&[u8], _>(..) {
+            let (key, value) = result?;
+
             let key: json::Value = match cbor::from_slice(&*key) {
                 Ok(key) => key,
                 // key is malformed.
@@ -278,7 +281,9 @@ impl Cache {
     fn cleanup(&self) -> Result<(), Error> {
         let now = Utc::now();
 
-        for (key, value) in self.inner.db.iterator(rocksdb::IteratorMode::Start) {
+        for result in self.inner.db.range::<&[u8], _>(..) {
+            let (key, value) = result?;
+
             let entry: PartialStoredEntry = match cbor::from_slice(&*value) {
                 Ok(entry) => entry,
                 Err(e) => {
@@ -294,13 +299,13 @@ impl Cache {
                     }
 
                     // delete key since it's invalid.
-                    self.inner.db.delete(key)?;
+                    self.inner.db.del(key)?;
                     continue;
                 }
             };
 
             if entry.is_expired(now) {
-                self.inner.db.delete(key)?;
+                self.inner.db.del(key)?;
             }
         }
 
@@ -355,7 +360,7 @@ impl Cache {
         };
 
         log::trace!("store:{}", KeyFormat(key));
-        self.inner.db.put(key, value)?;
+        self.inner.db.set(key, value)?;
         Ok(())
     }
 
@@ -623,11 +628,11 @@ impl fmt::Display for KeyFormat<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{rocksdb, Cache, Duration, Error};
+    use super::{Cache, Duration, Error};
     use std::{error, fs, sync::Arc, thread};
     use tempdir::TempDir;
 
-    fn db(name: &str) -> Result<Arc<rocksdb::DB>, Box<dyn error::Error>> {
+    fn db(name: &str) -> Result<Arc<sled::Tree>, Box<dyn error::Error>> {
         let path = TempDir::new(name)?;
         let path = path.path();
 
@@ -635,12 +640,8 @@ mod tests {
             fs::create_dir_all(path)?;
         }
 
-        let mut options = rocksdb::Options::default();
-        options.set_compression_type(rocksdb::DBCompressionType::Snappy);
-        options.set_keep_log_file_num(16);
-        options.create_if_missing(true);
-
-        Ok(Arc::new(rocksdb::DB::open(&options, path)?))
+        let db = sled::Db::start_default(path)?;
+        Ok(db.open_tree("test")?)
     }
 
     #[test]

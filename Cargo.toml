@@ -1,6 +1,6 @@
 [package]
 name = "futures-cache"
-version = "0.5.0"
+version = "0.6.0"
 authors = ["John-John Tedro <udoprog@tedro.se>"]
 edition = "2018"
 license = "MIT/Apache-2.0"
@@ -9,7 +9,7 @@ repository = "https://github.com/udoprog/futures-cache"
 homepage = "https://github.com/udoprog/futures-cache"
 documentation = "https://docs.rs/futures-cache"
 description = """
-Extension traits for dealing with optional futures and streams
+Futures-aware cache backed by sled.
 """
 
 [dependencies]
@@ -20,11 +20,11 @@ serde_cbor = "0.10.1"
 log = "0.4.7"
 chrono = {version = "0.4.7", features = ["serde"]}
 hex = "0.3.2"
-rocksdb = "0.12.3"
 parking_lot = "0.9.0"
 hashbrown = "0.5.0"
 pin-utils = "0.1.0-alpha.4"
 crossbeam = "0.7.1"
+sled = "0.24.1"
 
 [dev-dependencies]
 tempdir = "0.3.7"
