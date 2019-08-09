@@ -17,6 +17,7 @@ futures-preview = {version = "0.3.0-alpha.17", features = ["async-await", "night
 serde = {version = "1.0.97", features = ["derive"]}
 serde_json = "1.0.40"
 serde_cbor = "0.10.1"
+serde-hashkey = "0.2.0"
 log = "0.4.7"
 chrono = {version = "0.4.7", features = ["serde"]}
 hex = "0.3.2"

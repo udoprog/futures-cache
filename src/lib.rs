@@ -21,6 +21,7 @@ use hex::ToHex as _;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_cbor as cbor;
+use serde_hashkey as hashkey;
 use serde_json as json;
 use std::{
     error, fmt,
@@ -39,6 +40,8 @@ pub use sled;
 pub enum Error {
     /// An underlying CBOR error.
     Cbor(cbor::error::Error),
+    /// An underlying HashKey error.
+    HashKey(hashkey::Error),
     /// An underlying JSON error.
     Json(json::error::Error),
     /// An underlying Sled error.
@@ -51,6 +54,7 @@ impl fmt::Display for Error {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Cbor(e) => write!(fmt, "CBOR error: {}", e),
+            Error::HashKey(e) => write!(fmt, "HashKey error: {}", e),
             Error::Json(e) => write!(fmt, "JSON error: {}", e),
             Error::Sled(e) => write!(fmt, "Database error: {}", e),
             Error::Failed => write!(fmt, "Operation failed"),
@@ -62,6 +66,7 @@ impl error::Error for Error {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Error::Cbor(e) => Some(e),
+            Error::HashKey(e) => Some(e),
             Error::Json(e) => Some(e),
             Error::Sled(e) => Some(e),
             _ => None,
@@ -78,6 +83,12 @@ impl From<json::error::Error> for Error {
 impl From<cbor::error::Error> for Error {
     fn from(error: cbor::error::Error) -> Self {
         Error::Cbor(error)
+    }
+}
+
+impl From<hashkey::Error> for Error {
+    fn from(error: hashkey::Error) -> Self {
+        Error::HashKey(error)
     }
 }
 
@@ -204,7 +215,7 @@ impl Waker {
 
 struct Inner {
     /// The serialized namespace this cache belongs to.
-    ns: Option<cbor::Value>,
+    ns: Option<hashkey::Key>,
     /// Underlying storage.
     db: Arc<sled::Tree>,
     /// Things to wake up.
@@ -235,13 +246,13 @@ impl Cache {
     }
 
     /// Delete the given key from the specified namespace.
-    pub fn delete_with_ns<N, K>(&self, ns: Option<&N>, key: K) -> Result<(), Error>
+    pub fn delete_with_ns<N, K>(&self, ns: Option<&N>, key: &K) -> Result<(), Error>
     where
         N: Serialize,
         K: Serialize,
     {
         let ns = match ns {
-            Some(ns) => Some(cbor::value::to_value(ns)?),
+            Some(ns) => Some(hashkey::to_key(ns)?),
             None => None,
         };
 
@@ -321,12 +332,9 @@ impl Cache {
     where
         N: Serialize,
     {
-        // NB: Convert to value first to guarantee serialization order is consistent.
-        let key = cbor::value::to_value(ns)?;
-
         Ok(Self {
             inner: Arc::new(Inner {
-                ns: Some(key),
+                ns: Some(hashkey::to_key(ns)?),
                 db: self.inner.db.clone(),
                 wakers: Default::default(),
             }),
@@ -592,18 +600,15 @@ impl Cache {
     }
 
     /// Helper to serialize the key with a specific namespace.
-    fn key_with_ns<T>(&self, ns: Option<&cbor::Value>, key: T) -> Result<Vec<u8>, Error>
+    fn key_with_ns<T>(&self, ns: Option<&hashkey::Key>, key: &T) -> Result<Vec<u8>, Error>
     where
         T: Serialize,
     {
-        // NB: needed to make sure key serialization is consistently ordered.
-        // Internally serde_cbor uses ordered structured to store data.
-        let key = cbor::value::to_value(key)?;
-        let key = Key(ns, key);
+        let key = Key(ns, hashkey::to_key(key)?);
         return Ok(cbor::to_vec(&key)?);
 
         #[derive(Serialize)]
-        struct Key<'a>(Option<&'a cbor::Value>, cbor::Value);
+        struct Key<'a>(Option<&'a hashkey::Key>, hashkey::Key);
     }
 }
 
