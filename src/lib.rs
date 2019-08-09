@@ -252,7 +252,7 @@ impl Cache {
         K: Serialize,
     {
         let ns = match ns {
-            Some(ns) => Some(hashkey::to_key(ns)?),
+            Some(ns) => Some(hashkey::to_key(ns)?.normalize()),
             None => None,
         };
 
@@ -334,7 +334,7 @@ impl Cache {
     {
         Ok(Self {
             inner: Arc::new(Inner {
-                ns: Some(hashkey::to_key(ns)?),
+                ns: Some(hashkey::to_key(ns)?.normalize()),
                 db: self.inner.db.clone(),
                 wakers: Default::default(),
             }),
@@ -604,7 +604,8 @@ impl Cache {
     where
         T: Serialize,
     {
-        let key = Key(ns, hashkey::to_key(key)?);
+        let key = hashkey::to_key(key)?.normalize();
+        let key = Key(ns, key);
         return Ok(cbor::to_vec(&key)?);
 
         #[derive(Serialize)]
