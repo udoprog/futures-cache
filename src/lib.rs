@@ -1,4 +1,3 @@
-#![feature(async_await)]
 #![deny(missing_docs)]
 //! # Futures-aware cache abstraction
 //!
@@ -15,7 +14,7 @@
 
 use chrono::{DateTime, Utc};
 use crossbeam::queue::SegQueue;
-use futures::channel::oneshot;
+use futures_channel::oneshot;
 use hashbrown::HashMap;
 use hex::ToHex as _;
 use parking_lot::RwLock;

@@ -13,7 +13,7 @@ Futures-aware cache backed by sled.
 """
 
 [dependencies]
-futures-preview = {version = "0.3.0-alpha.17", features = ["async-await", "nightly"]}
+futures-channel-preview = "=0.3.0-alpha.19"
 serde = {version = "1.0.97", features = ["derive"]}
 serde_json = "1.0.40"
 serde_cbor = "0.10.1"
@@ -29,3 +29,4 @@ sled = "0.24.1"
 
 [dev-dependencies]
 tempdir = "0.3.7"
+futures-preview = "=0.3.0-alpha.19"
