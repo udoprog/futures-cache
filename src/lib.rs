@@ -256,7 +256,7 @@ impl Cache {
         };
 
         let key = self.key_with_ns(ns.as_ref(), key)?;
-        self.inner.db.del(&key)?;
+        self.inner.db.remove(&key)?;
         Ok(())
     }
 
@@ -309,13 +309,13 @@ impl Cache {
                     }
 
                     // delete key since it's invalid.
-                    self.inner.db.del(key)?;
+                    self.inner.db.remove(key)?;
                     continue;
                 }
             };
 
             if entry.is_expired(now) {
-                self.inner.db.del(key)?;
+                self.inner.db.remove(key)?;
             }
         }
 
@@ -367,7 +367,7 @@ impl Cache {
         };
 
         log::trace!("store:{}", KeyFormat(key));
-        self.inner.db.set(key, value)?;
+        self.inner.db.insert(key, value)?;
         Ok(())
     }
 
