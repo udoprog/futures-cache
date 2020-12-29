@@ -1,14 +1,23 @@
 # futures-cache
 
-[![Build Status](https://travis-ci.org/udoprog/futures-cache.svg?branch=master)](https://travis-ci.org/udoprog/futures-cache)
+Futures-aware cache abstraction
 
-Futures-aware cache backed by sled.
+Provides a cache for asynchronous operations that persist data on the
+filesystem using [sled]. The async cache works by accepting a future, but
+will cancel the accepted future in case the answer is already in the cache.
 
-## State
+It requires unique cache keys that are [serde] serializable. To distinguish
+across different sub-components of the cache, they can be namespaces using
+[Cache::namespaced].
+
+[sled]: https://github.com/spacejam/sled
+
+### State
 
 The state of the library is:
 * API is limited to only `wrap`, which includes a timeout ([#1]).
-* Requests are currently racing in the `wrap` method, so multiple unecessary requests might occur when they should instead be queueing up ([#2]).
+* Requests are currently racing in the `wrap` method, so multiple unecessary
+  requests might occur when they should //! instead be queueing up ([#2]).
 * Entries only expire when the library is loaded ([#3]).
 * Only storage backend is sled ([#4]).
 
@@ -17,49 +26,77 @@ The state of the library is:
 [#3]: https://github.com/udoprog/futures-cache/issues/3
 [#4]: https://github.com/udoprog/futures-cache/issues/4
 
-## Usage
+### Usage
 
 This library requires the user to add the following dependencies to use:
 
 ```toml
-futures-cache = "0.2.0"
+futures-cache = "0.3.0"
 serde = {version = "1.0.97", features = ["derive"]}
 ```
 
-## Examples
+### Examples
+
+Simple example showcasing fetching information on a github repository.
+
+> This is also available as an example you can run with:
+> ```
+> cargo run --example github -- --user udoprog --repo futures-cache
+> ```
 
 ```rust
-use std::{path::Path, fs, error::Error, sync::Arc};
-use futures_cache::{sled, Duration, Cache};
-use futures;
-use serde::{Serialize, Deserialize};
+use futures_cache::{Cache, Duration};
+use serde::Serialize;
+
+type Error = Box<dyn std::error::Error>;
 
 #[derive(Debug, Serialize)]
-enum Key<'a> {
-    /// Cache key for the get_user request.
-    GetUser(&'a str),
+enum GithubKey<'a> {
+    Repo { user: &'a str, repo: &'a str },
 }
 
-fn setup_db() -> Result<sled::Db, Box<dyn Error>> {
-    let path = Path::new("path/to/cache");
+async fn github_repo(user: &str, repo: &str) -> Result<String, Error> {
+    use reqwest::header;
+    use reqwest::{Client, Url};
 
-    if !path.is_dir() {
-        fs::create_dir_all(path)?;
-    }
+    let client = Client::new();
 
-    Ok(sled::Db::start_default(path)?)
+    let url = Url::parse(&format!("https://api.github.com/repos/{}/{}", user, repo))?;
+
+    let req = client
+        .get(url)
+        .header(header::USER_AGENT, "Reqwest/0.10.10")
+        .build()?;
+
+    let body = client.execute(req).await?.text().await?;
+    Ok(body)
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let db = setup_db()?;
+#[tokio::main]
+async fn main() -> Result<(), Error> {
+    let db = sled::open("cache")?;
     let cache = Cache::load(db.open_tree("cache")?)?;
-    let api = Api::new()?;
 
-    futures::executor::block_on(async move {
-        // Cache for 12 hours.
-        let mary = cache.wrap(Key::GetUser("mary"), Duration::hours(12), api.get_user("mary")).await?;
-        // Second request will be cached.
-        let mary2 = cache.wrap(Key::GetUser("mary"), Duration::hours(12), api.get_user("mary")).await?;
-    });
+    let user = "udoprog";
+    let repo = "futures-cache";
+
+    let text = cache
+        .wrap(
+            GithubKey::Repo {
+                user: user,
+                repo: repo,
+            },
+            Duration::seconds(60),
+            github_repo(user, repo),
+        )
+        .await?;
+
+    println!("{}", text);
+    Ok(())
 }
 ```
+
+[serde]: https://docs.rs/serde
+[Cache::namespaced]: https://docs.rs/futures-cache/0/futures_cache/struct.Cache.html#method.namespaced
+
+License: MIT/Apache-2.0
