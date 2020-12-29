@@ -22,14 +22,11 @@ use serde::{Deserialize, Serialize};
 use serde_cbor as cbor;
 use serde_hashkey as hashkey;
 use serde_json as json;
-use std::{
-    error, fmt,
-    future::Future,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-};
+use std::error;
+use std::fmt;
+use std::future::Future;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 pub use chrono::Duration;
 pub use sled;
@@ -192,7 +189,7 @@ impl Waker {
             while previous > 1 {
                 let mut received = 0usize;
 
-                while let Ok(waker) = self.channels.pop() {
+                while let Some(waker) = self.channels.pop() {
                     received += 1;
                     let _ = waker.send(error);
                 }
@@ -216,7 +213,7 @@ struct Inner {
     /// The serialized namespace this cache belongs to.
     ns: Option<hashkey::Key>,
     /// Underlying storage.
-    db: Arc<sled::Tree>,
+    db: sled::Tree,
     /// Things to wake up.
     /// TODO: clean up wakers that have been idle for a long time in future cleanup loop.
     wakers: RwLock<HashMap<Vec<u8>, Arc<Waker>>>,
@@ -232,7 +229,7 @@ pub struct Cache {
 
 impl Cache {
     /// Load the cache from the database.
-    pub fn load(db: Arc<sled::Tree>) -> Result<Cache, Error> {
+    pub fn load(db: sled::Tree) -> Result<Cache, Error> {
         let cache = Cache {
             inner: Arc::new(Inner {
                 ns: None,
@@ -619,12 +616,12 @@ impl fmt::Display for KeyFormat<'_> {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match cbor::from_slice::<cbor::Value>(self.0) {
             Ok(value) => value,
-            Err(_) => return self.0.write_hex(fmt),
+            Err(_) => return self.0.encode_hex::<String>().fmt(fmt),
         };
 
         let value = match json::to_string(&value) {
             Ok(value) => value,
-            Err(_) => return self.0.write_hex(fmt),
+            Err(_) => return self.0.encode_hex::<String>().fmt(fmt),
         };
 
         value.fmt(fmt)
@@ -637,7 +634,7 @@ mod tests {
     use std::{error, fs, sync::Arc, thread};
     use tempdir::TempDir;
 
-    fn db(name: &str) -> Result<Arc<sled::Tree>, Box<dyn error::Error>> {
+    fn db(name: &str) -> Result<sled::Tree, Box<dyn error::Error>> {
         let path = TempDir::new(name)?;
         let path = path.path();
 
@@ -645,7 +642,7 @@ mod tests {
             fs::create_dir_all(path)?;
         }
 
-        let db = sled::Db::start_default(path)?;
+        let db = sled::open(path)?;
         Ok(db.open_tree("test")?)
     }
 
