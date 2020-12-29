@@ -18,7 +18,7 @@ async fn github_repo(user: &str, repo: &str) -> Result<String, Error> {
 
     let req = client
         .get(url)
-        .header(header::USER_AGENT, "Reqwest/0.10.10")
+        .header(header::USER_AGENT, "Reqwest/0.10")
         .build()?;
 
     let body = client.execute(req).await?.text().await?;

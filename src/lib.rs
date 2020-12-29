@@ -1,4 +1,9 @@
 #![deny(missing_docs)]
+//! 
+//! [![Documentation](https://docs.rs/futures-cache/badge.svg)](https://docs.rs/futures-cache)
+//! [![Crates](https://img.shields.io/crates/v/futures-cache.svg)](https://crates.io/crates/futures-cache)
+//! [![Actions Status](https://github.com/udoprog/futures-cache/workflows/Rust/badge.svg)](https://github.com/udoprog/futures-cache/actions)
+//! 
 //! Futures-aware cache abstraction
 //!
 //! Provides a cache for asynchronous operations that persist data on the
@@ -30,8 +35,8 @@
 //! This library requires the user to add the following dependencies to use:
 //!
 //! ```toml
-//! futures-cache = "0.3.0"
-//! serde = {version = "1.0.97", features = ["derive"]}
+//! futures-cache = "0.10.0"
+//! serde = {version = "1.0", features = ["derive"]}
 //! ```
 //!
 //! ## Examples
@@ -39,7 +44,7 @@
 //! Simple example showcasing fetching information on a github repository.
 //!
 //! > This is also available as an example you can run with:
-//! > ```
+//! > ```sh
 //! > cargo run --example github -- --user udoprog --repo futures-cache
 //! > ```
 //!
@@ -64,7 +69,7 @@
 //!
 //!     let req = client
 //!         .get(url)
-//!         .header(header::USER_AGENT, "Reqwest/0.10.10")
+//!         .header(header::USER_AGENT, "Reqwest/0.10")
 //!         .build()?;
 //!
 //!     let body = client.execute(req).await?.text().await?;
