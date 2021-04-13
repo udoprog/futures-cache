@@ -1,9 +1,9 @@
 #![deny(missing_docs)]
-//! 
+//!
 //! [![Documentation](https://docs.rs/futures-cache/badge.svg)](https://docs.rs/futures-cache)
 //! [![Crates](https://img.shields.io/crates/v/futures-cache.svg)](https://crates.io/crates/futures-cache)
 //! [![Actions Status](https://github.com/udoprog/futures-cache/workflows/Rust/badge.svg)](https://github.com/udoprog/futures-cache/actions)
-//! 
+//!
 //! Futures-aware cache abstraction
 //!
 //! Provides a cache for asynchronous operations that persist data on the
@@ -113,11 +113,11 @@ use serde::{Deserialize, Serialize};
 use serde_cbor as cbor;
 use serde_hashkey as hashkey;
 use serde_json as json;
-use std::error;
 use std::fmt;
 use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::{borrow::Borrow, error};
 
 pub use chrono::Duration;
 pub use sled;
@@ -576,6 +576,15 @@ impl Cache {
             .clone()
     }
 
+    /// Expires the given key
+    pub async fn expire<'a, E>(&'a self, key: ExpiredKey) -> Result<(), E>
+    where
+        E: From<Error>,
+    {
+        self.delete_with_ns(key.ns.as_ref(), &key.key)?;
+        Ok(())
+    }
+
     /// Wrap the result of the given future to load and store from cache.
     pub async fn wrap<'a, K, F, T, E>(&'a self, key: K, age: Duration, future: F) -> Result<T, E>
     where
@@ -719,9 +728,185 @@ impl fmt::Display for KeyFormat<'_> {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+/// Represents an expired key. The key is not introspectable except observing it's namespace
+/// and when it expired.
+pub struct ExpiredKey {
+    ns: Option<hashkey::Key>,
+    key: hashkey::Key,
+    expired_at: DateTime<Utc>,
+}
+
+impl ExpiredKey {
+    /// Returns the namespace of the expired key
+    pub fn namespace<'a>(&'a self) -> Option<&'a hashkey::Key> {
+        self.ns.as_ref()
+    }
+    /// Returns the datetime (UTC) the key expired at
+    pub fn expired_at<'a>(&self) -> &DateTime<Utc> {
+        assert!(
+            self.expired_at < DateTime::<Utc>::from(std::time::SystemTime::now()),
+            "Expired key expired before current time (did your clock skew?)"
+        );
+        &self.expired_at
+    }
+    #[cfg(test)]
+    /// Convert a namespace and key into an ExpiredKey with DateTime set to the unix epoch
+    pub fn from(ns: Option<&[u8]>, key: &[u8]) -> Result<Self, Error> {
+        Ok(Self {
+            ns: ns.map(|ns| hashkey::to_key(&ns)).transpose()?,
+            key: hashkey::to_key(&key)?,
+            expired_at: DateTime::<Utc>::from(std::time::UNIX_EPOCH),
+        })
+    }
+    #[cfg(test)]
+    /// The DateTime of the expired_at timestamp is set to the unix epoch
+    pub fn zero_expiry(mut self) -> Self {
+        self.expired_at = DateTime::<Utc>::from(std::time::UNIX_EPOCH);
+        self
+    }
+}
+
+/// This iterator will return all expired entries in cache. Can scan multiple caches. The Iterator will continue
+/// to scan and may return more entries after returning None.
+pub struct CacheExpiredKeyIterator {
+    caches: Vec<Cache>,
+    cache_idx: usize,
+    last_key: Option<hashkey::Key>,
+    max_scans: Option<usize>,
+}
+
+impl CacheExpiredKeyIterator {
+    /// Construct an empty CacheExpiredKeyIterator. This instance will not return anything unless caches are added to it
+    pub fn empty() -> Self {
+        Self {
+            caches: Vec::new(),
+            cache_idx: 0,
+            last_key: None,
+            max_scans: None,
+        }
+    }
+    /// Construct an empty CacheExpiredKeyIterator with a limit on the number of keys to check for expiration each invocation
+    pub fn empty_with_max_scans(max_scans: Option<usize>) -> Self {
+        Self {
+            max_scans,
+            ..Self::empty()
+        }
+    }
+    /// Construct a CacheExpiredKeyIterator from an existing Cache and a limit on the number of scans to perform
+    pub fn from_cache(f: Cache, max_scans: Option<usize>) -> Self {
+        Self {
+            caches: vec![f],
+            ..Self::empty_with_max_scans(max_scans)
+        }
+    }
+    /// Add a cache to the list of caches to scan.
+    pub fn add_cache(&mut self, c: Cache) {
+        self.caches.push(c);
+    }
+}
+
+impl From<Cache> for CacheExpiredKeyIterator {
+    fn from(f: Cache) -> Self {
+        Self::from_cache(f, None)
+    }
+}
+
+impl Iterator for CacheExpiredKeyIterator {
+    type Item = Result<ExpiredKey, Error>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.caches.is_empty() {
+            return None;
+        }
+        let cache = self.caches[self.cache_idx].clone();
+        let mut scans = 0;
+
+        let last_key = match self.last_key.clone() {
+            Some(t) => t,
+            None => {
+                let first = cache.inner.db.first();
+                let first = match first {
+                    Err(e) => return Some(Err(Error::Sled(e))),
+                    Ok(v) => v,
+                };
+                match first {
+                    None => {
+                        log::trace!("cache empty, advancing to next cache");
+                        self.cache_idx += 1;
+                        self.cache_idx = self.cache_idx % self.caches.len();
+                        return None;
+                    }
+                    Some(t) => match hashkey::to_key(&t.0.to_vec()) {
+                        Err(e) => return Some(Err(Error::HashKey(e))),
+                        Ok(v) => v.normalize(),
+                    },
+                }
+            }
+        };
+        let mut last_key = match cache.key(&last_key) {
+            Err(e) => return Some(Err(e)),
+            Ok(v) => v,
+        };
+        log::trace!("last_key = {:?}", String::from_utf8_lossy(&last_key));
+        while scans < self.max_scans.unwrap_or(1000) {
+            // Retrieve key. If there is no more keys, go to the next cache and return None
+            let (new_last_key, value): (Vec<u8>, Vec<u8>) = match cache.inner.db.get_gt(&last_key) {
+                Ok(v) => match v {
+                    None => {
+                        if scans == 0 {
+                            log::trace!("key was empty on first scan, making exception, trying for the first key");
+                            match cache.inner.db.first() {
+                                Ok(Some((k, v))) => (k.to_vec(), v.to_vec()),
+                                Ok(None) => {
+                                    log::trace!("current key empty, probably a race, aborting");
+                                    self.cache_idx += 1;
+                                    self.cache_idx = self.cache_idx % self.caches.len();
+                                    self.last_key = None;
+                                    return None;
+                                }
+                                Err(e) => return Some(Err(Error::Sled(e))),
+                            }
+                        } else {
+                            log::trace!("scanned all keys in cache, resetting index and advancing to next cache");
+                            self.cache_idx += 1;
+                            // Clamp cache index to index count
+                            self.cache_idx = self.cache_idx % self.caches.len();
+                            log::trace!("next cache id: {}", self.cache_idx);
+                            self.last_key = None;
+                            return None;
+                        }
+                    }
+                    Some(v) => (v.0.to_vec(), v.1.to_vec()),
+                },
+                Err(e) => return Some(Err(Error::Sled(e))),
+            };
+            log::trace!("next_key = {:?}", String::from_utf8_lossy(&new_last_key));
+            if new_last_key == last_key {
+                log::trace!("lastkey = nextkey => returning");
+                return None;
+            }
+            last_key = new_last_key;
+            let value: PartialStoredEntry =
+                cbor::from_slice(&value).expect("could not decode stored entry");
+            if value.is_expired(DateTime::from(std::time::SystemTime::now())) {
+                log::trace!("key expired, returning");
+                return Some(Ok(ExpiredKey {
+                    ns: cache.inner.ns.clone(),
+                    key: hashkey::to_key(&last_key).expect("just deserialized, must be valid key"),
+                    expired_at: value.expires_at,
+                }));
+            }
+            log::trace!("key didn't expire, check next key");
+            // Increment scan counter
+            scans += 1;
+        }
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Cache, Duration, Error};
+    use super::{Cache, CacheExpiredKeyIterator, Duration, Error, ExpiredKey};
     use std::{error, fs, sync::Arc, thread};
     use tempdir::TempDir;
 
@@ -735,6 +920,47 @@ mod tests {
 
         let db = sled::open(path)?;
         Ok(db.open_tree("test")?)
+    }
+
+    #[test]
+    fn test_expiry_iterator() -> Result<(), Box<dyn error::Error>> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let db = db("test_cached_expiry")?;
+        let cache = Cache::load(db)?;
+
+        let count = Arc::new(AtomicUsize::default());
+        let c = count.clone();
+
+        let op1 = cache.wrap("a", Duration::seconds(1), async move {
+            let _ = c.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, Error>(String::from("foo"))
+        });
+
+        ::futures::executor::block_on(async move { op1.await })?;
+
+        let mut expiry_iter: CacheExpiredKeyIterator = cache.into();
+
+        assert_eq!(
+            expiry_iter.next().transpose()?,
+            None,
+            "No expiry after creation of entry"
+        );
+
+        std::thread::sleep(Duration::seconds(2).to_std()?);
+
+        #[derive(serde::Serialize)]
+        struct Key<'a>(Option<&'a serde_hashkey::Key>, serde_hashkey::Key);
+
+        let key = Key(None, serde_hashkey::to_key(&"a")?);
+
+        assert_eq!(
+            expiry_iter.next().transpose()?.map(|x| x.zero_expiry()),
+            Some(ExpiredKey::from(None, &serde_cbor::to_vec(&key)?)?),
+            "Expired entry must be returned"
+        );
+
+        Ok(())
     }
 
     #[test]
