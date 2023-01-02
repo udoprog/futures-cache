@@ -40,7 +40,7 @@ The state of the library is:
 This library requires the user to add the following dependencies to use:
 
 ```toml
-futures-cache = "0.10.0"
+futures-cache = "0.10.1"
 serde = {version = "1.0", features = ["derive"]}
 ```
 

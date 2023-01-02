@@ -1,6 +1,6 @@
 [package]
 name = "futures-cache"
-version = "0.10.0"
+version = "0.10.1"
 authors = ["John-John Tedro <udoprog@tedro.se>"]
 edition = "2018"
 description = "Futures-aware cache backed by sled."
