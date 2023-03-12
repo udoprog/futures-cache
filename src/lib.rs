@@ -298,7 +298,14 @@ impl Waker {
                 previous = self.pending.fetch_sub(received, Ordering::AcqRel);
             }
 
-            previous = self.pending.compare_and_swap(1, 0, Ordering::AcqRel);
+            previous =
+                match self
+                    .pending
+                    .compare_exchange(1, 0, Ordering::AcqRel, Ordering::Acquire)
+                {
+                    Ok(n) => n,
+                    Err(n) => n,
+                };
 
             if previous == 1 {
                 break;
@@ -351,7 +358,7 @@ impl Cache {
         };
 
         let key = self.key_with_ns(ns.as_ref(), key)?;
-        self.inner.db.remove(&key)?;
+        self.inner.db.remove(key)?;
         Ok(())
     }
 
@@ -362,13 +369,13 @@ impl Cache {
         for result in self.inner.db.range::<&[u8], _>(..) {
             let (key, value) = result?;
 
-            let key: json::Value = match cbor::from_slice(&*key) {
+            let key: json::Value = match cbor::from_slice(&key) {
                 Ok(key) => key,
                 // key is malformed.
                 Err(_) => continue,
             };
 
-            let stored = match cbor::from_slice(&*value) {
+            let stored = match cbor::from_slice(&value) {
                 Ok(storage) => storage,
                 // something weird stored in there.
                 Err(_) => continue,
@@ -389,18 +396,18 @@ impl Cache {
         for result in self.inner.db.range::<&[u8], _>(..) {
             let (key, value) = result?;
 
-            let entry: PartialStoredEntry = match cbor::from_slice(&*value) {
+            let entry: PartialStoredEntry = match cbor::from_slice(&value) {
                 Ok(entry) => entry,
                 Err(e) => {
                     if log::log_enabled!(log::Level::Trace) {
                         log::warn!(
                             "{}: failed to load: {}: {}",
-                            KeyFormat(&*key),
+                            KeyFormat(&key),
                             e,
-                            KeyFormat(&*value)
+                            KeyFormat(&value)
                         );
                     } else {
-                        log::warn!("{}: failed to load: {}", KeyFormat(&*key), e);
+                        log::warn!("{}: failed to load: {}", KeyFormat(&key), e);
                     }
 
                     // delete key since it's invalid.
@@ -478,7 +485,7 @@ impl Cache {
     /// Load an entry from the cache.
     #[inline(always)]
     fn inner_test(&self, key: &[u8]) -> Result<State<()>, Error> {
-        let value = match self.inner.db.get(&key)? {
+        let value = match self.inner.db.get(key)? {
             Some(value) => value,
             None => {
                 log::trace!("test:{} -> null (missing)", KeyFormat(key));
@@ -584,7 +591,7 @@ impl Cache {
     }
 
     /// Wrap the result of the given future to load and store from cache.
-    pub async fn wrap<'a, K, F, T, E>(&'a self, key: K, age: Duration, future: F) -> Result<T, E>
+    pub async fn wrap<K, F, T, E>(&self, key: K, age: Duration, future: F) -> Result<T, E>
     where
         K: Serialize,
         F: Future<Output = Result<T, E>>,

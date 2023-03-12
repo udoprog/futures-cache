@@ -39,10 +39,10 @@ async fn main() -> Result<(), Error> {
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--user" => {
-                user = it.next().ok_or_else(|| "missing argument to `--user`")?;
+                user = it.next().ok_or("missing argument to `--user`")?;
             }
             "--repo" => {
-                repo = it.next().ok_or_else(|| "missing argument to `--repo`")?;
+                repo = it.next().ok_or("missing argument to `--repo`")?;
             }
             "-h" | "--help" => {
                 println!("github [--user <user>] [--repo <repo>]");

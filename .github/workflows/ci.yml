@@ -7,6 +7,14 @@ on:
       - main
 
 jobs:
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - uses: dtolnay/rust-toolchain@1.68
+    - run: cargo build --workspace --all-targets
+    - run: cargo build --workspace --all-targets --no-default-features
+
   test:
     runs-on: ubuntu-latest
     steps:
