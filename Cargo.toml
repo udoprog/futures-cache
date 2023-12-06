@@ -9,7 +9,7 @@ documentation = "https://docs.rs/futures-cache"
 readme = "README.md"
 homepage = "https://github.com/udoprog/futures-cache"
 repository = "https://github.com/udoprog/futures-cache"
-license = "MIT/Apache-2.0"
+license = "MIT OR Apache-2.0"
 keywords = ["async", "cache"]
 categories = ["asynchronous"]
 
