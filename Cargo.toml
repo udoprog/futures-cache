@@ -1,13 +1,12 @@
 [package]
 name = "futures-cache"
-version = "0.10.3"
+version = "0.11.0"
 authors = ["John-John Tedro <udoprog@tedro.se>"]
 edition = "2018"
 rust-version = "1.95"
 description = "Futures-aware cache backed by sled."
 documentation = "https://docs.rs/futures-cache"
 readme = "README.md"
-homepage = "https://github.com/udoprog/futures-cache"
 repository = "https://github.com/udoprog/futures-cache"
 license = "MIT OR Apache-2.0"
 keywords = ["async", "cache"]

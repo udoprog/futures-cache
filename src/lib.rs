@@ -37,7 +37,7 @@
 //! This library requires the user to add the following dependencies to use:
 //!
 //! ```toml
-//! futures-cache = "0.10.3"
+//! futures-cache = "0.11.0"
 //! serde = {version = "1.0", features = ["derive"]}
 //! ```
 //!
